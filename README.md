@@ -231,3 +231,10 @@ export RAG_STRICT_THRESHOLD=0.35  # higher = more refusals, lower = more answers
 - Build admin tools to rebuild the index periodically from fresh data.
 - Add authentication and role‑based access control around the Streamlit app.
 - Swap out the Ollama model for domain‑specific LLMs depending on your use case.
+
+---
+
+## 8. License and contributing
+
+- License: [MIT](LICENSE)
+- Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
