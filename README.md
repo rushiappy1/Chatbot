@@ -1,58 +1,233 @@
-# Local RAG Chatbot (FAISS + Sentence-Transformers + Ollama)
+# Local RAG Chatbot (FAISS + Sentence-Transformers + Ollama + Streamlit)
 
-This small prototype shows how to build a fully local Retrieval-Augmented Generation (RAG) chatbot that:
+This project is a small, fully local Retrieval‑Augmented Generation (RAG) chatbot that:
 
-- Builds semantic embeddings from your data (CSV or SQL via pyodbc)
-- Stores embeddings in FAISS
-- Retrieves top-k context chunks for a user query
-- Sends the context + question to a local LLM via the Ollama CLI
-- Presents the answer in a Gradio chat UI
+- Builds semantic embeddings from your data (CSV or SQL) using `sentence-transformers`.
+- Stores embeddings in a FAISS index (`data/index.faiss`).
+- Stores metadata in MongoDB so the chatbot can fetch the original text.
+- Retrieves top‑k context chunks for each user query.
+- Sends the context + question to a local LLM via the Ollama Python client.
+- Presents a single **Streamlit UI** with a human‑friendly assistant that only answers from your data.
 
-Files created
-- `requirements.txt` - Python dependencies
-- `build_index.py` - Build FAISS index and metadata from CSV or SQL
-- `chat_ui.py` - Gradio UI that queries FAISS and Ollama
+The repository also includes a synthetic demo dataset (`example.csv`) so you can test the flow without real data.
 
-Quick start
+> **Note:** `example.csv` contains synthetic demo records only. It is *not* production data.
 
-1. Create a virtual environment and install dependencies
+---
+
+## Files overview
+
+- `app.py` – main Streamlit app (chat UI + greeting, strict RAG behavior).
+- `build_index.py` – builds FAISS index + Parquet metadata from CSV or SQL.
+- `database.py` – example script for pulling data from MSSQL.
+- `example.csv` – synthetic demo attendance/vehicle data.
+- `requirements.txt` – Python dependencies.
+
+---
+
+## 1. Environment setup (CPU‑only and CUDA/GPU)
+
+### 1.1. Create and activate a virtual environment
 
 ```bash
 python -m venv venv
-source venv/bin/activate
+source venv/bin/activate  # Windows: venv\\Scripts\\activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-2. Build an index from `example.csv` (demo synthetic data)
+### 1.2. CPU‑only mode (simplest)
+
+If you don’t have a GPU or CUDA installed, you can run everything on CPU:
+
+- Make sure you have a recent Python (3.9+ recommended).
+- Install requirements (done above).
+- SentenceTransformers and FAISS will use CPU automatically.
+
+You don’t need to change any code for CPU‑only mode.
+
+### 1.3. Optional: CUDA/GPU acceleration
+
+If you have an NVIDIA GPU and CUDA installed, you can speed up embedding and LLM inference.
+
+1. Install CUDA‑enabled PyTorch (adjust URL/version as needed):
+
+   ```bash
+   pip install 'torch>=2.0.0' --index-url https://download.pytorch.org/whl/cu118
+   ```
+
+2. Verify GPU is visible:
+
+   ```python
+   python - << 'PY'
+   import torch
+   print("CUDA available:", torch.cuda.is_available())
+   PY
+   ```
+
+3. SentenceTransformers will automatically use GPU if available. If you want to be explicit in your own scripts when encoding, you can do:
+
+   ```python
+   from sentence_transformers import SentenceTransformer
+   model = SentenceTransformer("all-MiniLM-L6-v2", device="cuda")  # or "cpu"
+   ```
+
+> The current `build_index.py` and `app.py` instantiate `SentenceTransformer("all-MiniLM-L6-v2")` without an explicit device; if CUDA is visible, it will typically use the GPU.
+
+---
+
+## 2. Ollama setup
+
+The chatbot calls a local LLM via the [Ollama](https://ollama.ai/) Python client.
+
+1. Install Ollama (Linux/macOS):
+
+   ```bash
+   curl -fsSL https://ollama.ai/install.sh | sh
+   ```
+
+2. Pull a model (default in this repo is `llama3`):
+
+   ```bash
+   ollama pull llama3
+   ```
+
+3. Make sure the Ollama service is running (`ollama` usually runs as a background service).
+
+4. (Optional) Change the model via environment variable:
+
+   ```bash
+   export OLLAMA_MODEL=llama3  # or another Ollama model name
+   ```
+
+---
+
+## 3. Build the FAISS index
+
+You must build the FAISS index before running the chatbot. There are two common paths:
+
+### 3.1. From the synthetic demo CSV (`example.csv`)
+
+`example.csv` contains a note row and synthetic demo records. To build an index from it:
 
 ```bash
 python build_index.py --csv example.csv --text-column text --out data
 ```
 
-3. Install Ollama and pull a model (optional but recommended)
+> Note: `build_index.py` ignores the note row and constructs concise text summaries from the CSV columns for each record. It then:
+>
+> - Embeds the summaries with `all-MiniLM-L6-v2`.
+> - Writes `data/index.faiss`.
+> - Writes `data/metadata.parquet` (id + text).
 
-Follow instructions at https://ollama.ai/
+You can then load these into MongoDB (one document per row) with fields like `faiss_idx`, `id`, and `text`. The chatbot expects that mapping to exist.
+
+### 3.2. From your real data (CSV or SQL)
+
+There are two main options:
+
+#### Option A: Real CSV
+
+1. Export your real data (e.g. attendance/vehicle reports) to a CSV with the same columns as `example.csv` or adapt `load_data_from_csv` in `build_index.py` to your schema.
+2. Run:
+
+   ```bash
+   python build_index.py --csv your_real_data.csv --out data
+   ```
+
+3. Load the resulting metadata (Parquet) into MongoDB and maintain a `faiss_idx` field for each row, matching the FAISS index order.
+
+#### Option B: Directly from SQL (MSSQL / others via pyodbc)
+
+1. Configure a pyodbc connection string.
+2. Adjust the SQL query in your own script (or reuse `database.py`) to return an `id` and `text` column or adapt `load_data_from_sql` in `build_index.py` to your table.
+3. Run:
+
+   ```bash
+   python build_index.py \
+       --sql "SELECT id, text FROM your_table" \
+       --conn "DRIVER={SQL Server};SERVER=.;DATABASE=db;UID=user;PWD=pwd" \
+       --out data
+   ```
+
+4. Again, load the generated metadata into MongoDB with a `faiss_idx` field.
+
+---
+
+## 4. MongoDB configuration
+
+The chatbot reads context documents from MongoDB based on FAISS indices. The following environment variables control this:
 
 ```bash
-# install via their script (macOS/Linux)
-curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull llama3
+export MONGO_URI="mongodb://localhost:27017"
+export MONGO_DB="vehicle_attendance"
+export MONGO_COLLECTION="chatbot_docs"
 ```
 
-4. Run the Gradio chat UI
+Each document in `chatbot_docs` should have at least:
+
+- `faiss_idx` – integer index position (matching FAISS order).
+- `text` – the text chunk for that index.
+- Optionally `id` and other metadata.
+
+You can adapt your own loader script to insert these docs based on `data/metadata.parquet` and the FAISS index ordering.
+
+---
+
+## 5. Running the Streamlit chatbot
+
+Once:
+
+- Dependencies are installed.
+- Ollama is running with a pulled model.
+- FAISS index (`data/index.faiss`) and MongoDB metadata are in place.
+
+Run the app:
 
 ```bash
-python chat_ui.py
+streamlit run app.py --server.port 7860
 ```
 
-Notes & troubleshooting
+Then open the URL Streamlit prints, e.g. `http://localhost:7860`.
 
-- If you don't have Ollama, replace `call_ollama` in `chat_ui.py` with a local LLM runner or a simple echo function for testing.
-- The chunking strategy in `build_index.py` is naive; consider using a text splitter that respects sentence boundaries and token counts.
-- For production with many documents, use an on-disk FAISS index and tune index type.
+### Chatbot behavior
 
-Next steps (optional)
+- Greets the user as “Trashbot assistant”.
+- Answers **only** from your indexed company data (via FAISS + MongoDB).
+- If the answer is not clearly supported by the retrieved context, it responds with:
 
-- Add conversational memory (store previous Q/A and include in prompt)
-- Add reranking or a stronger embedder for higher accuracy
-- Add a FastAPI backend and authentication if exposing over network
+  > I don't know the answer based on the company data I have.
+
+- Responses are short, human, and easy to read (1–3 concise sentences or a very short bullet list).
+
+You can tune the strictness via:
+
+```bash
+export RAG_STRICT_THRESHOLD=0.35  # higher = more refusals, lower = more answers
+```
+
+---
+
+## 6. Troubleshooting
+
+- **`ModuleNotFoundError` for `ollama`, `sentence_transformers`, etc.**
+  - Ensure your virtualenv is activated and run `pip install -r requirements.txt`.
+
+- **FAISS index not found**
+  - Make sure you ran `build_index.py` and that `data/index.faiss` exists.
+
+- **MongoDB errors**
+  - Check that MongoDB is running and credentials/DB/collection names match the environment variables.
+
+- **Slow performance**
+  - Consider enabling CUDA (if you have a GPU).
+  - Use smaller models or fewer retrieved chunks (tune `TOP_K` in `app.py`).
+
+---
+
+## 7. Extending this project
+
+- Add more structured sources (other SQL tables, APIs) by converting them to text and indexing them.
+- Build admin tools to rebuild the index periodically from fresh data.
+- Add authentication and role‑based access control around the Streamlit app.
+- Swap out the Ollama model for domain‑specific LLMs depending on your use case.
