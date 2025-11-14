@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+.ipynb_checkpoints/
+
+# Data and indexes (not for git)
+/data/index.faiss
+/data/metadata.parquet
+*.parquet
+
+# Local CSVs: track example.csv demo, ignore others
+example.csv
+!example.csv
+
+# Notebooks and scratch
+*.ipynb
+
+# OS / editor
+.DS_Store
+*.code-workspace
