@@ -234,7 +234,79 @@ export RAG_STRICT_THRESHOLD=0.35  # higher = more refusals, lower = more answers
 
 ---
 
-## 8. License and contributing
+## 8. Deployment (Docker, docker-compose, NGINX)
+
+You can containerize and deploy the chatbot using the provided `Dockerfile` and `docker-compose.yml`. A simple architecture looks like:
+
+```
+NGINX  →  Streamlit app container (this repo) → Python RAG code + FAISS + MongoDB
+          ↑
+        Docker
+
+Ollama runs on the host or in a separate Docker container
+MongoDB runs as a service (local or Atlas)
+```
+
+### 8.1. Build and run with Docker only
+
+```bash
+# Build image
+docker build -t trashbot-app .
+
+# Run container
+docker run --rm -p 7860:7860 \
+  -e OLLAMA_MODEL=llama3 \
+  -e MONGO_URI="mongodb://host.docker.internal:27017" \
+  -e MONGO_DB=vehicle_attendance \
+  -e MONGO_COLLECTION=chatbot_docs \
+  trashbot-app
+```
+
+Then visit `http://localhost:7860`.
+
+> Note: `host.docker.internal` works on macOS/Windows; on Linux you may need to pass the host IP or run MongoDB in Docker (see below).
+
+### 8.2. Run app + MongoDB with docker-compose
+
+The repository includes a `docker-compose.yml` that starts:
+
+- `app` – the Streamlit RAG chatbot (this codebase).
+- `mongo` – a MongoDB instance used as metadata store.
+
+Run:
+
+```bash
+docker compose up --build
+```
+
+This will expose:
+
+- Chatbot at `http://localhost:7860`
+- MongoDB at `mongodb://localhost:27017`
+
+You can configure env vars in your shell or an `.env` file (docker-compose will interpolate them), for example:
+
+```bash
+export OLLAMA_MODEL=llama3
+export EMBEDDER_MODEL=all-MiniLM-L6-v2
+export RAG_TOP_K=3
+export RAG_CHUNK_CHAR_LIMIT=700
+export RAG_STRICT_THRESHOLD=0.35
+export RAG_SAFE_MODE=strict
+```
+
+### 8.3. Optional: NGINX reverse proxy
+
+For production, you may want to put NGINX in front of the app for TLS and a friendly domain.
+
+- Example config: `deploy/nginx.conf`.
+- In `docker-compose.yml`, you can uncomment the `nginx` service and start it alongside the app.
+
+The provided config proxies HTTP traffic on port 80 to the `app` service (Streamlit) inside Docker.
+
+---
+
+## 9. License and contributing
 
 - License: [MIT](LICENSE)
 - Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
