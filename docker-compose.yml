@@ -1,0 +1,67 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    container_name: trashbot-app
+    environment:
+      # LLM and RAG settings
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3}
+      - EMBEDDER_MODEL=${EMBEDDER_MODEL:-all-MiniLM-L6-v2}
+      - RAG_TOP_K=${RAG_TOP_K:-3}
+      - RAG_CHUNK_CHAR_LIMIT=${RAG_CHUNK_CHAR_LIMIT:-700}
+      - RAG_STRICT_THRESHOLD=${RAG_STRICT_THRESHOLD:-0.35}
+      - RAG_SAFE_MODE=${RAG_SAFE_MODE:-strict}
+
+      # MongoDB connection
+      - MONGO_URI=mongodb://mongo:27017
+      - MONGO_DB=${MONGO_DB:-vehicle_attendance}
+      - MONGO_COLLECTION=${MONGO_COLLECTION:-chatbot_docs}
+
+      # Optional MSSQL connection for vehicle report
+      - DB_SERVER=${DB_SERVER:-}
+      - DB_NAME=${DB_NAME:-}
+      - DB_USER=${DB_USER:-}
+      - DB_PASS=${DB_PASS:-}
+
+    ports:
+      - "7860:7860"  # expose Streamlit directly (or behind nginx)
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    container_name: trashbot-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
+  # Optional: if you want to run Ollama in Docker as well, uncomment and configure
+  # ollama:
+  #   image: ollama/ollama
+  #   container_name: ollama
+  #   ports:
+  #     - "11434:11434"  # default Ollama port
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   restart: unless-stopped
+
+  # Optional: NGINX reverse proxy in front of Streamlit (for TLS, domain, etc.)
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: trashbot-nginx
+  #   volumes:
+  #     - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   depends_on:
+  #     - app
+  #   restart: unless-stopped
+
+volumes:
+  mongo-data:
+  # ollama-models:

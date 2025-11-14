@@ -14,9 +14,16 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 INDEX_PATH = os.path.join(DATA_DIR, "index.faiss")
 
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "llama3")
+EMBEDDER_MODEL = os.environ.get("EMBEDDER_MODEL", "all-MiniLM-L6-v2")
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 DB = os.environ.get("MONGO_DB", "vehicle_attendance")
 COLL = os.environ.get("MONGO_COLLECTION", "chatbot_docs")
+
+# RAG tuning (can be overridden via env)
+TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
+CHUNK_CHAR_LIMIT = int(os.environ.get("RAG_CHUNK_CHAR_LIMIT", "700"))
+STRICT_REFUSAL_THRESHOLD = float(os.environ.get("RAG_STRICT_THRESHOLD", "0.35"))  # cosine/IP score
+SAFE_MODE = os.environ.get("RAG_SAFE_MODE", "strict").lower()  # "strict" or "soft"
 
 # SQL DB (for vehicle report tab)
 DB_SERVER = os.environ.get("DB_SERVER", "")
@@ -26,10 +33,8 @@ DB_PASS = os.environ.get("DB_PASS", "")
 
 # load once (RAG resources)
 index = faiss.read_index(INDEX_PATH)
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+embedder = SentenceTransformer(EMBEDDER_MODEL)
 mongo = MongoClient(MONGO_URI)[DB][COLL]
-
-STRICT_REFUSAL_THRESHOLD = float(os.environ.get("RAG_STRICT_THRESHOLD", "0.35"))  # cosine/IP score
 
 
 def retrieve(q, k=3):
@@ -63,9 +68,13 @@ def retrieve(q, k=3):
         txt = (d.get("text") or "").strip()
         if not txt:
             continue
+        # Truncate long chunks for UI/prompt
+        if len(txt) > CHUNK_CHAR_LIMIT:
+            txt = txt[:CHUNK_CHAR_LIMIT].rsplit(" ", 1)[0] + "..."
         results.append({
             "text": txt,
             "score": float(score),
+            "faiss_idx": idx,
         })
     return results
 
@@ -193,36 +202,55 @@ def row_to_rag_fact(row):
 
 # streamlit run app.py --server.port 7860
 
-def rag(q):
-    """RAG answer with strict refusals and a human, but grounded, tone."""
-    ctx = retrieve(q)
+def rag(q, history=None):
+    """RAG answer with strict refusals and a human, but grounded, tone.
 
-    # If nothing relevant is retrieved, refuse to answer.
+    history: optional list of (user, assistant) turns to give the LLM more context.
+    """
+    ctx = retrieve(q, k=TOP_K)
+
+    # If nothing relevant is retrieved, decide based on SAFE_MODE.
     if not ctx:
-        return IDK_MESSAGE
+        if SAFE_MODE == "soft":
+            return IDK_MESSAGE + " You can try rephrasing your question or narrowing the date/vehicle range.", []
+        return IDK_MESSAGE, []
 
     # Use the best score (FAISS returns results sorted by score).
     best_score = ctx[0]["score"]
     if best_score < STRICT_REFUSAL_THRESHOLD:
-        return IDK_MESSAGE
+        if SAFE_MODE == "soft":
+            return IDK_MESSAGE + " The data I found is not strong enough to answer confidently.", ctx
+        return IDK_MESSAGE, ctx
 
     ctx_text = "\n\n".join(c["text"] for c in ctx)
 
+    history_text = ""
+    if history:
+        # Keep only last few turns to keep prompt small
+        recent = history[-3:]
+        parts = []
+        for u, a in recent:
+            parts.append(f"User: {u}\nAssistant: {a}")
+        history_text = "\n\n".join(parts)
+
     prompt = (
-        "You are a friendly but precise company assistant. "
-        "You have access only to the CONTEXT below, which comes from internal databases and documents. "
-        "You MUST obey these rules:\n"
-        "1) Use ONLY the information in the context to answer. Do NOT use outside knowledge.\n"
+        "You are a friendly, professional company assistant. "
+        "You answer in clear, well-structured English, similar in tone and quality to GPT-4, "
+        "but you must strictly follow these rules:\n"
+        "1) Use ONLY the information in the CONTEXT to answer. Do NOT use outside knowledge.\n"
         "2) If the answer is not clearly supported by the context, or you are unsure, "
         "you MUST reply exactly: 'I don't know the answer based on the company data I have.'\n"
-        "3) When you do answer, be short, human, and easy to read. Prefer 1–3 concise sentences or a VERY short bullet list.\n\n"
-        f"CONTEXT:\n{ctx_text}\n\n"
-        f"QUESTION: {q}\n"
-        "Now give your answer following the rules above."
+        "3) When you do answer, be short but polished. Prefer 1–3 sentences or a very short bullet list. "
+        "Avoid raw JSON or overly technical formatting unless the user explicitly asks for it.\n\n"
     )
 
+    if history_text:
+        prompt += "Recent conversation (for context, do not invent new facts):\n" + history_text + "\n\n"
+
+    prompt += f"CONTEXT:\n{ctx_text}\n\nQUESTION: {q}\nNow give your answer following the rules above."
+
     r = ollama.chat(model=MODEL_NAME, messages=[{"role": "user", "content": prompt}])
-    return r["message"]["content"]
+    return r["message"]["content"], ctx
 
 st.set_page_config(page_title="Trashbot", layout="wide")
 
@@ -249,11 +277,62 @@ with chat_tab:
         """,
         unsafe_allow_html=True,
     )
-    query = st.text_input("Ask a question about the company data:")
-    if query:
+
+    # Sidebar controls for model and RAG tuning
+    with st.sidebar:
+        st.markdown("### Chatbot settings")
+        st.caption("Configured via environment variables; shown here for visibility.")
+        st.text(f"LLM model: {MODEL_NAME}")
+        st.text(f"Embedder: {EMBEDDER_MODEL}")
+        st.text(f"TOP_K: {TOP_K}")
+        st.text(f"Chunk char limit: {CHUNK_CHAR_LIMIT}")
+        st.text(f"Strict threshold: {STRICT_REFUSAL_THRESHOLD}")
+        st.text(f"Safe mode: {SAFE_MODE}")
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []  # list of (user, assistant)
+
+    col_q1, col_q2 = st.columns([4, 1])
+    with col_q1:
+        query = st.text_input("Ask a question about the company data:", key="chat_query")
+    with col_q2:
+        clear = st.button("Clear chat", key="chat_clear")
+
+    if clear:
+        st.session_state.chat_history = []
+        st.rerun()
+
+    if st.button("Send", key="chat_send") and query:
         with st.spinner("Thinking based on your company data..."):
-            ans = rag(query)
-        st.write(ans)
+            answer, ctx = rag(query, history=st.session_state.chat_history)
+        st.session_state.chat_history.append((query, answer))
+
+        # Show latest context snippets in an expander
+        with st.expander("Show retrieved context for this answer", expanded=False):
+            for i, c in enumerate(ctx, start=1):
+                st.markdown(f"**Chunk {i} (score={c['score']:.3f}, idx={c['faiss_idx']}):**")
+                st.write(c["text"])
+
+    # Display chat history
+    if st.session_state.chat_history:
+        st.markdown("---")
+        st.markdown("**Conversation history**")
+        for user_msg, bot_msg in st.session_state.chat_history:
+            st.markdown(f"**You:** {user_msg}")
+            st.markdown(f"**Trashbot:** {bot_msg}")
+            st.markdown("<hr style='margin:4px 0' />", unsafe_allow_html=True)
+
+    # Export chat transcript
+    if st.session_state.chat_history:
+        transcript_lines = []
+        for u, a in st.session_state.chat_history:
+            transcript_lines.append(f"User: {u}\nAssistant: {a}\n")
+        st.download_button(
+            "Download chat transcript",
+            data="\n".join(transcript_lines),
+            file_name="trashbot_chat_transcript.txt",
+            mime="text/plain",
+        )
 
 with report_tab:
     st.subheader("Vehicle Duty / Scan Report")
